@@ -1,0 +1,452 @@
+clear; clc; close all;
+
+%% ========================================================================
+% DEFINIÇÃO DE PARÂMETROS
+% ========================================================================
+
+% parâmetros físicos do drone
+m = 0.027;               % @ 1.1
+g = 9.81;                % @ 1.2
+k_drag = 0.01;           % @ 1.2 => coeficiente de arrasto aerodinâmico [N/(m/s)]
+
+% @ 1.1 => matriz de inércia (J) => [kg*m^2]
+Jx = 1.4e-5;
+Jy = 1.4e-5;
+Jz = 2.1e-5;
+J  = diag([Jx, Jy, Jz]);
+
+% parâmetros dos motores e aerodinâmica
+cT = 3.16e-10;  % coeficiente de empuxo (T = cT * w^2)
+tau_m = 0.05;      % @ 1.5 => constante de tempo do motor [s]
+arm_length = 0.046;     % [m]
+torque_factor = 0.01;    % [Nm/N]
+
+% @ 1.4: configuração geometrica e matriz de alocação
+L = arm_length;
+c = torque_factor;
+d = L * sin(pi/4);  % configuração em X
+
+% mapeamento [T1;T2;T3;T4] => [T_total; nx; ny; nz]
+u_map = [ 1,  1,  1,  1;
+         -d, -d,  d,  d;
+         -d,  d,  d, -d;
+          c, -c,  c, -c];
+
+
+
+%% ========================================================================
+% Non-Linear Model Simulation (1.5)
+% ========================================================================
+
+time_step = 0.01;
+sim_time = 5;
+n_steps = sim_time / time_step;
+
+% Velocidade de hover para os motores
+w_hover = sqrt((m*g/4) / cT);
+
+% Estado inicial: parado a 10 m de altitude
+initial_state = zeros(16, 1);
+initial_state(3) = 10;  % altitude inicial [m]
+initial_state(13:16) = w_hover; % motores já à velocidade de hover
+
+% Comando: 5% acima do hover para o drone subir ligeiramente
+u_cmd = ones(4,1) * w_hover * 1.05;
+
+time = (0:n_steps-1) * time_step;
+states = zeros(16, n_steps);
+states(:,1) = initial_state;
+
+for k = 1:n_steps-1
+    p = states(1:3, k);
+    v = states(4:6, k);
+    phi = states(7, k);
+    theta = states(8, k);
+    psi = states(9, k);
+    omega = states(10:12,k);
+    w_motor = states(13:16,k);
+
+    % motor dynamics
+    w_motor_dot = (u_cmd - w_motor) / tau_m;
+
+    % Força de cada rotor
+    T_rotors = cT * w_motor.^2;
+
+    % control allocation
+    ctrl_vec = u_map * T_rotors;
+    T_total = ctrl_vec(1);
+    n_p = ctrl_vec(2:4);
+
+    % Força de propulsão @Body
+    fp_body = [0; 0; T_total];
+
+    % Gravidade e arrasto @Body
+    R_BI = rotation_matrix_euler(phi, theta, psi);
+    fg_body = R_BI' * [0; 0; -m*g];
+    fa_body = -k_drag * v;
+
+    % Força total no corpo
+    f_total = fg_body + fa_body + fp_body;
+
+    % Dinâmica rotacional (Euler) e translacional (Newton)
+    omega_dot = J \ (n_p - cross(omega, J*omega));
+    v_dot = f_total/m - cross(omega, v);
+
+    % Cinemática dos ângulos de Euler
+    E = euler_kinematics_matrix(phi, theta);
+    euler_dot  = E * omega;
+
+    % Integração numérica 
+    states(4:6,  k+1) = v + v_dot * time_step;
+    states(10:12,k+1) = omega + omega_dot * time_step;
+    states(7:9,  k+1) = states(7:9,k) + euler_dot * time_step;
+    states(13:16,k+1) = w_motor + w_motor_dot* time_step;
+
+    v_inertial = R_BI * states(4:6, k+1);
+    states(1:3,  k+1) = p + v_inertial * time_step;
+end
+
+% --- Plots da Simulação ---
+figure('Name', '1.5: Simulacao Nao-Linear (ENU)', 'Position', [100, 100, 1000, 700]);
+
+subplot(2,2,1);
+plot3(states(1,:), states(2,:), states(3,:), 'b-', 'LineWidth', 1.5);
+xlabel('X (Este) [m]'); ylabel('Y (Norte) [m]'); zlabel('Z (Altitude) [m]');
+title('Trajetoria 3D (ENU)'); grid on; view(45,30); hold on;
+plot3(states(1,1),   states(2,1),   states(3,1),   'go', 'MarkerFaceColor','g', 'DisplayName','Inicio');
+plot3(states(1,end), states(2,end), states(3,end), 'ro', 'MarkerFaceColor','r', 'DisplayName','Fim');
+legend('Location','Best');
+
+subplot(2,2,2);
+plot(time, states(3,:), 'b-', 'LineWidth', 1.5);
+xlabel('Tempo [s]'); ylabel('Altitude (Z) [m]');
+title('Altitude vs Tempo'); grid on;
+
+subplot(2,2,3);
+plot(time, states(4,:),'r-', time, states(5,:),'g-', time, states(6,:),'b-', 'LineWidth', 1.5);
+xlabel('Tempo [s]'); ylabel('Velocidade [m/s]');
+title('Velocidade Linear (corpo)'); legend('Vx','Vy','Vz'); grid on;
+
+subplot(2,2,4);
+plot(time, states(13,:),'r-', time, states(14,:),'g--', ...
+     time, states(15,:),'b-', time, states(16,:),'k--', 'LineWidth', 1.5);
+xlabel('Tempo [s]'); ylabel('Velocidade [rad/s]');
+title('Dinamica dos Motores'); legend('M1','M2','M3','M4','Location','Best'); grid on;
+
+
+%% ========================================================================
+% OP1 - HOVER
+% ========================================================================
+disp('--- 1.6 (OP1): Trim State ---');
+
+% OP1: Hover  => equilibrio: T = m*g (all torques = 0, velocidades = 0)
+T_hover   = m * g;
+ue_hover  = [T_hover; 0; 0; 0];  % u = [T; nx; ny; nz]
+xe_hover  = zeros(12,1); 
+
+fprintf('OP1 Hover:\n');
+fprintf('  T_hover = %.6f N\n', T_hover);
+fprintf('  xe = zeros(12,1),  ue = [%.6f; 0; 0; 0]\n\n', T_hover);
+
+
+disp('--- 1.7 (OP1):  Hover Linearization   ---');
+
+% Z subsyst --------------
+A_z_OP1 = [0,1; 0,0];
+B_z_OP1 = [0; 1/m];
+C_z_OP1 = eye(2); 
+
+% Roll subsyst (X) --------------- 
+% States: [phi; p; py; vy_I],  Input: nx
+
+A_roll_OP1 = [0,1,0,0;  0,0,0,0;  0,0,0,1;  g,0,0,0];
+B_roll_OP1 = [0;  1/Jx;  0;  0];
+C_roll_OP1 = eye(4);
+
+% Pitch subsyst (Y) ---------------
+% States: [theta; q; px; vx_I],  Inputs: ny
+% vx_I_dot  = -g*theta  (pitch negativo => aceleração positiva em X_I)
+A_pitch_OP1 = [0,1,0,0;  0,0,0,0;  0,0,0,1;  -g,0,0,0];   
+B_pitch_OP1 = [0;  1/Jy;  0;  0];
+C_pitch_OP1 = eye(4);
+
+% Yaw subsyst -----------------------
+% States: [psi; r],  Input: nz
+A_yaw_OP1 = [0,1;  0,0];
+B_yaw_OP1 = [0;  1/Jz];
+C_yaw_OP1 = eye(2);
+
+disp('A_z:');   disp(A_z_OP1);
+disp('A_roll:'); disp(A_roll_OP1);
+disp('A_pitch:'); disp(A_pitch_OP1);
+disp('A_yaw:'); disp(A_yaw_OP1);
+
+
+%% ========================================================================
+% OP2 - LINEARIZATION  => HORIZONTAL FLIGHT
+% ========================================================================
+
+disp('--- 1.6 (OP2): Trim State ---');
+
+% OP2: Horizontal flight 
+vx0 = 1.0;   % [m/s] velocidade horizontal (guess)
+theta_e  = asin(-k_drag * vx0 / (m * g));  % [rad] Força de arrasto no eixo X_B
+T_flight = m * g / cos(theta_e);  % [N] empuxo ligeiramente maior para sustentar altitude
+ue_flight = [T_flight; 0; 0; 0];
+
+fprintf('OP2 Voo Horizontal (vx0 = %.1f m/s):\n', vx0);
+fprintf('  theta_e  = %.6f rad (%.4f graus)\n', theta_e, rad2deg(theta_e));
+fprintf('  T_flight = %.6f N\n', T_flight);
+fprintf('  ue = [%.6f; 0; 0; 0]\n\n', T_flight);
+
+
+disp('--- 1.7 (OP2): Horizontal Flight Linearization ---');
+
+% Coeficientes uteis para a linearizacao
+alpha = -(T_flight/m) * cos(theta_e);  % d(vx_I_dot)/d(delta_theta)
+beta  =  (T_flight/m) * sin(theta_e);  % d(vz_I_dot)/d(delta_theta)  [valor pequeno]
+kd_m  = k_drag / m;                    % coeficiente de amortecimento por arrasto [1/s]
+
+fprintf('Parametros de equilibrio OP.2:\n');
+fprintf('  vx0      = %.4f m/s\n',   vx0);
+fprintf('  theta_e  = %.6f rad\n',   theta_e);
+fprintf('  T_flight = %.6f N\n',     T_flight);
+fprintf('  alpha    = %.6f m/s2/rad\n', alpha);
+fprintf('  kd/m     = %.6f 1/s\n\n', kd_m);
+
+
+% Pitch subsyst (Y) ---------------
+% States: [delta_theta; delta_q; delta_px; delta_vx_I],  Inputs: [delta_ny; delta_T]
+
+A_pitch_OP2 = [0,1,0,0;  0,0,0,0;  0,0,0,1;  alpha,0,0,-kd_m];
+%B_pitch_OP2 = [0;  1/Jy;  0;  0];
+B_pitch_OP2 = [0,0;  1/Jy,0;   0,0;   0,-sin(theta_e)/m]; % drone = inclinado para a frente => + T ;  vai pra frente (x) tmb
+C_pitch_OP2 = eye(4);
+
+disp('A_pitch_OP2:'); disp(A_pitch_OP2);
+disp('B_pitch_OP2:'); disp(B_pitch_OP2);
+
+% Z subsyst --------------
+% States (x) : [delta_pz; delta_vz_I]   Input (u): delta_T (perturbacao no empuxo total)
+
+A_z_OP2 = [0,1;  0, -kd_m];   % arrasto da altitude aparece no OP.2
+B_z_OP2 = [0; cos(theta_e)/m];    % ganho de T em vz e menor que 1/m
+C_z_OP2 = eye(2);
+
+disp('A_z_OP2:'); disp(A_z_OP2);
+disp('B_z_OP2:'); disp(B_z_OP2);
+
+
+% Roll + Yaw subsyst  --------------- 
+% In a pure horizontal flight => phi_e = psi_e = 0 vy0 = ZERO !!!
+
+disp('Subsistemas Roll/Y e Yaw: identicos ao OP.1 (phi_e=0, psi_e=0, vy0=0).');
+
+
+%% ========================================================================
+% EIGENVALUES (OP1 + OP2)  =>  1.8
+% ========================================================================
+
+% --- Calcular eigenvalores OP.1 ---
+eig_z_OP1     = eig(A_z_OP1);
+eig_roll_OP1  = eig(A_roll_OP1);
+eig_pitch_OP1 = eig(A_pitch_OP1);
+eig_yaw_OP1   = eig(A_yaw_OP1);
+
+% --- Calcular eigenvalores OP.2 ---
+eig_pitch_OP2 = eig(A_pitch_OP2);
+eig_z_OP2     = eig(A_z_OP2);
+eig_roll_OP2  = eig(A_roll_OP1);   % = OP.1
+eig_yaw_OP2   = eig(A_yaw_OP1);    % = OP.1
+
+% --- Imprimir tabela conjunta ---
+disp('--- 1.8: Eigenvalores OP.1 (Hover) vs OP.2 (Voo Horizontal) ---');
+fprintf('%-15s | %-30s | %-30s\n', 'Subsistema', 'OP.1 Hover', 'OP.2 Voo Horizontal');
+fprintf('%s\n', repmat('-', 1, 80));
+
+fprintf('%-15s | %-30s | %-30s\n', 'Z (Altitude)', ...
+    format_eigs(eig_z_OP1), format_eigs(eig_z_OP2));
+fprintf('%-15s | %-30s | %-30s\n', 'Pitch / X', ...
+    format_eigs(eig_pitch_OP1), format_eigs(eig_pitch_OP2));
+fprintf('%-15s | %-30s | %-30s\n', 'Roll / Y', ...
+    format_eigs(eig_roll_OP1), format_eigs(eig_roll_OP2));
+fprintf('%-15s | %-30s | %-30s\n', 'Yaw', ...
+    format_eigs(eig_yaw_OP1), format_eigs(eig_yaw_OP2));
+fprintf('\n');
+
+disp('Nota OP.1: Todos os polos na origem => Marginalmente Estavel.');
+disp('Nota OP.2: Arrasto introduz polo com Re<0 em Z e Pitch/X =>');
+disp('           amortecimento natural nas velocidades, mas polos');
+disp('           de posicao continuam na origem.');
+
+% --- Plot Conjunto ---
+figure('Name', '1.8: Eigenvalores OP.1 vs OP.2', 'Position', [100, 100, 750, 550]);
+hold on; grid on;
+xline(0, 'k--', 'LineWidth', 1);
+yline(0, 'k--', 'LineWidth', 1);
+
+% OP.1 (azul)
+plot(real(eig_z_OP1),     imag(eig_z_OP1),     'bs', 'MarkerSize', 14, 'MarkerFaceColor', 'b', 'DisplayName', 'Z OP.1');
+plot(real(eig_pitch_OP1), imag(eig_pitch_OP1), 'b^', 'MarkerSize', 14, 'MarkerFaceColor', 'b', 'DisplayName', 'Pitch/X OP.1');
+plot(real(eig_roll_OP1),  imag(eig_roll_OP1),  'bd', 'MarkerSize', 14, 'MarkerFaceColor', 'b', 'DisplayName', 'Roll/Y OP.1');
+plot(real(eig_yaw_OP1),   imag(eig_yaw_OP1),   'bo', 'MarkerSize', 14, 'MarkerFaceColor', 'b', 'DisplayName', 'Yaw OP.1');
+
+% OP.2 (vermelho)
+plot(real(eig_z_OP2),     imag(eig_z_OP2),     'rs', 'MarkerSize', 10, 'MarkerFaceColor', 'r', 'DisplayName', 'Z OP.2');
+plot(real(eig_pitch_OP2), imag(eig_pitch_OP2), 'r^', 'MarkerSize', 10, 'MarkerFaceColor', 'r', 'DisplayName', 'Pitch/X OP.2');
+plot(real(eig_roll_OP2),  imag(eig_roll_OP2),  'rd', 'MarkerSize', 10, 'MarkerFaceColor', 'r', 'DisplayName', 'Roll/Y OP.2');
+plot(real(eig_yaw_OP2),   imag(eig_yaw_OP2),   'ro', 'MarkerSize', 10, 'MarkerFaceColor', 'r', 'DisplayName', 'Yaw OP.2');
+
+xlabel('Re'); ylabel('Im');
+title('Eigenvalores: OP.1 (Hover, azul) vs OP.2 (Voo Horizontal, vermelho)');
+legend('Location', 'eastoutside');
+xlim([-0.5, 0.5]); ylim([-5, 5]);
+
+
+%% ========================================================================
+% CONTROLABILITY, OBSERVABILITY E STABILITY (OP1 + OP2)  =>  1.9
+% ========================================================================
+disp('--- 1.9: Controlabilidade, Observabilidade e Estabilidade ---');
+fprintf('%-15s | %-6s | %-20s | %-20s | %-8s\n', ...
+    'Subsistema', 'Modo', 'Controlavel', 'Observavel', 'Estavel');
+fprintf('%s\n', repmat('-', 1, 78));
+
+subsystems = {A_z_OP1, B_z_OP1,  C_z_OP1,'Z', 'OP.1';
+              A_z_OP2, B_z_OP2,     C_z_OP2,'Z', 'OP.2';
+              A_pitch_OP1, B_pitch_OP1, C_pitch_OP1,'Pitch/X','OP.1';
+              A_pitch_OP2, B_pitch_OP2, C_pitch_OP2, 'Pitch/X','OP.2';
+              A_roll_OP1, B_roll_OP1, C_roll_OP1, 'Roll/Y','OP.1=OP.2';
+              A_yaw_OP1, B_yaw_OP1, C_yaw_OP1, 'Yaw', 'OP.1=OP.2'};
+
+for i = 1:size(subsystems, 1)
+    A_i = subsystems{i,1};
+    B_i = subsystems{i,2};
+    C_i = subsystems{i,3};
+    nome = subsystems{i,4};
+    modo = subsystems{i,5};
+    n = size(A_i, 1);
+
+    rank_ctrl = rank(ctrb(A_i, B_i));
+    rank_obs = rank(obsv(A_i, C_i));
+    estavel = all(real(eig(A_i)) < 0);
+
+    ctrl_str = sprintf('%d/%d (%s)', rank_ctrl, n, yesno(rank_ctrl == n));
+    obs_str  = sprintf('%d/%d (%s)', rank_obs,  n, yesno(rank_obs  == n));
+
+    fprintf('%-15s | %-6s | %-20s | %-20s | %-8s\n', ...
+        nome, modo, ctrl_str, obs_str, yesno(estavel));
+
+    % Linha separadora entre subsistemas diferentes
+    if i < size(subsystems,1) && ~strcmp(subsystems{i,4}, subsystems{i+1,4})
+        fprintf('%s\n', repmat('-', 1, 78));
+    end
+end
+fprintf('\n');
+disp('Conclusao: Todos os subsistemas sao controlaveis e observaveis.');
+disp('           Nenhum e estritamente estavel em malha aberta (OP.1).');
+disp('           No OP.2, Z e Pitch/X tem amortecimento parcial pelo arrasto.');
+
+
+
+%% ========================================================================
+% TRANSFER FUNCTIONS  =>  1.10
+% ========================================================================
+disp('--- 1.10: Funcoes de Transferencia ---');
+s = tf('s');
+
+% Malhas Internas (Atitude) — Double integrators
+G_nx_phi   = 1 / (Jx * s^2);
+G_ny_theta = 1 / (Jy * s^2);
+G_nz_psi   = 1 / (Jz * s^2);
+
+% Malhas Externas (Posição)
+G_phi_py   =  g / s^2;   % Roll  => Y
+G_theta_px = -g / s^2;   % Pitch => X  (sinal negativo: pitch+ => aceleração -X)
+G_T_pz     = 1 / (m * s^2);  % Empuxo => Altitude
+
+disp('G_nx_phi   (nx -> phi):');   disp(G_nx_phi);
+disp('G_ny_theta (ny -> theta):'); disp(G_ny_theta);
+disp('G_nz_psi   (nz -> psi):');   disp(G_nz_psi);
+disp('G_phi_py   (phi -> py):');   disp(G_phi_py);
+disp('G_theta_px (theta -> px):'); disp(G_theta_px);
+disp('G_T_pz     (T -> pz):');     disp(G_T_pz);
+
+
+%% ========================================================================
+% ROOT LOCUS --> G_T_pz e G_phi_py  =>  1.11
+% ========================================================================
+disp('--- 1.11: Analise Root Locus ---');
+
+% Controladores simples para análise
+Kp = 1;
+Kd = 0.5;
+C_P  = Kp;
+C_PD = Kp + Kd * s;
+
+figure('Name', '1.11: Root Locus', 'Position', [100, 100, 1200, 450]);
+
+% G_T_pz com controlador P (instável: polos na origem, sem margem)
+subplot(1, 3, 1);
+rlocus(C_P * G_T_pz);
+title({'G_{T,pz}: Controlador P', '(polos ficam no eixo Im)'});
+grid on;
+
+% G_T_pz com controlador PD (o zero do PD estabiliza)
+subplot(1, 3, 2);
+rlocus(C_PD * G_T_pz);
+title({'G_{T,pz}: Controlador PD', '(zero puxa polos para esq.)'});
+grid on;
+
+% G_phi_py com controlador PD
+subplot(1, 3, 3);
+rlocus(C_PD * G_phi_py);
+title({'G_{\phi,py}: Controlador PD', '(idem: zero estabiliza)'});
+grid on;
+
+disp('Conclusao 1.11:');
+disp('  - Controlador P puro: polos em malha fechada ficam no eixo imaginario =>');
+disp('    sistema marginalmente estavel, nao robusto.');
+disp('  - Controlador PD: zero adicional puxa os polos para o semiplano esquerdo =>');
+disp('    sistema estavel em malha fechada.');
+disp('  - A malha G_phi_py tem o mesmo comportamento qualitativo que G_T_pz.');
+
+
+%% ========================================================================
+% FUNÇÕES AUXILIARES
+% ========================================================================
+
+function R = rotation_matrix_euler(phi, theta, psi)
+    % Matriz de Rotação Z-Y-X: leva vetor do inercial para o corpo
+    c_phi = cos(phi); s_phi = sin(phi);
+    c_the = cos(theta); s_the = sin(theta);
+    c_psi = cos(psi); s_psi = sin(psi);
+
+    R = [c_psi*c_the,  c_psi*s_the*s_phi - s_psi*c_phi,  c_psi*s_the*c_phi + s_psi*s_phi;
+         s_psi*c_the,  s_psi*s_the*s_phi + c_psi*c_phi,  s_psi*s_the*c_phi - c_psi*s_phi;
+        -s_the,         c_the*s_phi,                       c_the*c_phi];
+end
+
+function E = euler_kinematics_matrix(phi, theta)
+    % Matriz cinemática de Euler (ZYX): omega_body -> euler_dot
+    c_phi = cos(phi); s_phi = sin(phi);
+    c_the = cos(theta); t_the = tan(theta);
+
+    E = [1,  s_phi*t_the,  c_phi*t_the;
+         0,  c_phi,       -s_phi;
+         0,  s_phi/c_the,  c_phi/c_the];
+end
+
+function str = yesno(val)
+    if val
+        str = 'SIM';
+    else
+        str = 'NAO';
+    end
+end
+
+
+function str = format_eigs(ev)
+    % Formata vetor de eigenvalores como string compacta
+    parts = arrayfun(@(x) sprintf('%.4f', x), ev, 'UniformOutput', false);
+    str = strjoin(parts, '  ');
+end
