@@ -1,0 +1,286 @@
+clear; clc; close all;
+
+%% ========================================================================
+% Análise da posição/trajetória =>  2.1
+% ========================================================================
+
+
+data = readtable('2024-04-04_log07.csv');
+
+t_log = (data.timestamp - data.timestamp(1)) / 1000;
+
+
+px = data.stateEstimate_x;
+py = data.stateEstimate_y;
+pz = data.stateEstimate_z;
+pitch = data.stateEstimate_pitch;
+roll = data.stateEstimate_roll;
+
+
+
+figure('Name', 'Posições Temporais', 'Color', 'w');
+
+subplot(3,1,1);
+plot(t_log, px, 'r', 'LineWidth', 1.2);
+ylabel('p1 [m]'); title('Posição no Eixo 1'); grid on;
+
+subplot(3,1,2);
+plot(t_log, py, 'g', 'LineWidth', 1.2);
+ylabel('p2 [m]'); title('Posição no Eixo 2'); grid on;
+
+subplot(3,1,3);
+plot(t_log, pz, 'b', 'LineWidth', 1.2);
+ylabel('p3 [m]'); xlabel('Tempo [s]'); title('Posição no Eixo 3'); grid on;
+
+
+% Percurso do drone no espaço 3D
+figure('Name', 'Trajetória 3D do Drone', 'Color', 'w');
+plot3(px, py, pz, 'LineWidth', 1.5, 'Color', [0.4 0.4 0.4]); % Trajetória a cinza
+hold on;
+
+
+plot3(px(1), py(1), pz(1), 'go', 'MarkerFaceColor', 'g', 'MarkerSize', 8); % Início
+plot3(px(end), py(end), pz(end), 'ro', 'MarkerFaceColor', 'r', 'MarkerSize', 8); % Fim
+
+grid on; axis equal;
+xlabel('P1 [m]'); ylabel('P2 [m]'); zlabel('P3 [m]');
+title('Trajetória 3D do Drone no Espaço');
+legend('Trajetória', 'Ponto Inicial', 'Ponto Final');
+view(-45, 30); 
+
+
+%% ========================================================================
+% Evolução dos ângulos de Euler/ Variação dos Inputs =>  2.2
+% =========================================================================
+
+
+
+data = readtable('2024-04-04_log07.csv');
+t_log1 = (data.timestamp - data.timestamp(1)) / 1000; % Tempo em segundos
+
+% Dados para os diferentes Ângulos de Euler
+phi = data.stateEstimate_roll;   
+theta = data.stateEstimate_pitch;
+yaw = data.stateEstimate_yaw;
+
+% Dados para os diferentes inputs
+m1 = data.motor_m1; m2 = data.motor_m2; m3 = data.motor_m3; m4 = data.motor_m4;
+u1 = m1 + m2 + m3 + m4;          % Thrust
+u2 = -m1 - m2 + m3 + m4;         % Roll Torque
+u3 = m1 - m2 - m3 + m4;          % Pitch Torque
+u4 = m1 - m2 + m3 - m4;          % Yaw Torque
+
+
+figure('Name', 'Figura: Angulos de Euler', 'Color', 'w');
+
+subplot(3,1,1);
+plot(t_log1, phi, 'b', 'LineWidth', 1);
+ylabel('\phi [deg]'); title('Roll (\lambda_1)');
+grid on; xlim([t_log1(1) t_log1(end)]);
+
+subplot(3,1,2);
+plot(t_log, theta, 'r', 'LineWidth', 1);
+ylabel('\theta [deg]'); title('Pitch (\lambda_2)');
+grid on; xlim([t_log1(1) t_log1(end)]);
+
+subplot(3,1,3);
+plot(t_log, yaw, 'Color', [0.49 0.18 0.56], 'LineWidth', 1);
+ylabel('\psi [deg]'); title('Yaw (\lambda_3)');
+xlabel('Tempo [s]');
+grid on; xlim([t_log1(1) t_log1(end)]);
+
+linkaxes(findall(gcf,'type','axes'),'x'); 
+
+
+figure('Name', 'Figura: Sinais de Controlo u_i', 'Color', 'w');
+
+subplot(4,1,1);
+plot(t_log1, u1, 'k', 'LineWidth', 1);
+ylabel('u_1 (Thrust)'); title('Sinais de Entrada de Controlo (Inputs)');
+grid on; xlim([t_log1(1) t_log1(end)]);
+
+subplot(4,1,2);
+plot(t_log1, u2, 'Color', [0.85 0.33 0.1], 'LineWidth', 1);
+ylabel('u_2 (Roll)');
+grid on; xlim([t_log1(1) t_log1(end)]);
+
+subplot(4,1,3);
+plot(t_log1, u3, 'Color', [0 0.45 0.74], 'LineWidth', 1);
+ylabel('u_3 (Pitch)');
+grid on; xlim([t_log1(1) t_log1(end)]);
+
+subplot(4,1,4);
+plot(t_log1, u4, 'Color', [0.47 0.67 0.19], 'LineWidth', 1);
+ylabel('u_4 (Yaw)');
+xlabel('Tempo [s]');
+grid on; xlim([t_log1(1) t_log1(end)]);
+
+linkaxes(findall(gcf,'type','axes'),'x'); 
+
+
+%% ========================================================================
+% Identificação dos modelos =>  2.3
+% =========================================================================
+
+% 1. Preparação dos Dados
+t_log = (data.timestamp - data.timestamp(1)) / 1000;
+Ts = mean(diff(t_log));
+
+% Saídas (Posições em metros)
+px = data.stateEstimate_x;
+py = data.stateEstimate_y;
+pz = data.stateEstimate_z;
+
+% Entradas - Conversão para Radianos
+theta_rad = data.stateEstimate_pitch * (pi/180); 
+phi_rad = data.stateEstimate_roll * (pi/180);
+
+
+u1_raw = data.motor_m1 + data.motor_m2 + data.motor_m3 + data.motor_m4;
+u1_norm = u1_raw / max(u1_raw); 
+
+
+dataX = iddata(px, theta_rad, Ts);
+dataY = iddata(py, phi_rad, Ts);
+dataZ = iddata(pz, u1_norm, Ts);
+
+
+sysX = tfest(dataX, 2, 0); 
+sysY = tfest(dataY, 2, 0); 
+sysZ = tfest(dataZ, 2, 0); 
+
+
+fprintf('\n--- FUNÇÕES DE TRANSFERÊNCIA IDENTIFICADAS ---\n');
+
+fprintf('\nG_theta_px (Eixo X - Rad p/ Metros):\n');
+G_theta_px = tf(sysX)
+
+fprintf('\nG_phi_py (Eixo Y - Rad p/ Metros):\n');
+G_phi_py = tf(sysY)
+
+fprintf('\nG_T_pz (Eixo Z - Thrust Norm p/ Metros):\n');
+G_T_pz = tf(sysZ)
+
+
+
+% Eixo X
+figure('Name', 'Identificação Eixo X: Input vs Output', 'Color', 'w');
+subplot(2,1,1);
+plot(t_log, theta_rad, 'r'); ylabel('\theta [rad]'); 
+title('Input: Pitch Angle'); grid on;
+subplot(2,1,2);
+plot(t_log, px, 'b'); ylabel('p_x [m]'); 
+xlabel('Tempo [s]'); title('Output: Position X'); grid on;
+
+% Eixo Y
+figure('Name', 'Identificação Eixo Y: Input vs Output', 'Color', 'w');
+subplot(2,1,1);
+plot(t_log, phi_rad, 'g'); ylabel('\phi [rad]'); 
+title('Input: Roll Angle'); grid on;
+subplot(2,1,2);
+plot(t_log, py, 'b'); ylabel('p_y [m]'); 
+xlabel('Tempo [s]'); title('Output: Position Y'); grid on;
+
+% Eixo Z
+figure('Name', 'Identificação Eixo Z: Input vs Output', 'Color', 'w');
+subplot(2,1,1);
+plot(t_log, u1_norm, 'k'); ylabel('u_1 [Norm]'); 
+title('Input: Thrust'); grid on;
+subplot(2,1,2);
+plot(t_log, pz, 'b'); ylabel('p_z [m]'); 
+xlabel('Tempo [s]'); title('Output: Position Z'); grid on;
+
+
+figure('Name', 'Identificação: Respostas ao Degrau', 'Color', 'w');
+subplot(3,1,1);
+step(sysX); title('Step Response: G_{\theta,p_x}(s) (Input: 1 rad)');
+grid on;
+subplot(3,1,2);
+step(sysY); title('Step Response: G_{\phi,p_y}(s) (Input: 1 rad)');
+grid on;
+subplot(3,1,3);
+step(sysZ); title('Step Response: G_{T,p_z}(s) (Input: Thrust Unitário)');
+grid on;
+
+%% ========================================================================
+% Funções de Transferência
+% ========================================================================
+fprintf('\n--- Funções de Transferência Identificadas (2.ª Ordem) ---\n');
+
+fprintf('\nEixo X (Entrada: pitch [deg] -> Saída: px [m]):\n');
+G_theta_px = tf(sysX)
+
+fprintf('\nEixo Y (Entrada: roll [deg] -> Saída: py [m]):\n');
+G_phi_py = tf(sysY)
+
+fprintf('\nEixo Z (Entrada: Thrust Normalizado [0-1] -> Saída: pz [m]):\n');
+G_T_pz = tf(sysZ)
+
+
+%% ========================================================================
+% Melhor FIT =>  2.4
+% =========================================================================
+
+
+dataX_val = detrend(iddata(px, theta_rad, Ts));
+dataY_val = detrend(iddata(py, phi_rad, Ts));
+dataZ_val = detrend(iddata(pz, u1_norm, Ts));
+
+figure('Name', 'Validação Eixo X', 'Color', 'w');
+compare(dataX_val, sysX); 
+title('Validação: Eixo X (p_x) - Comparação Real vs Modelo');
+grid on;
+
+figure('Name', 'Validação Eixo Y', 'Color', 'w');
+compare(dataY_val, sysY);
+title('Validação: Eixo Y (p_y) - Comparação Real vs Modelo');
+grid on;
+
+figure('Name', 'Validação Eixo Z', 'Color', 'w');
+compare(dataZ_val, sysZ);
+title('Validação: Eixo Z (p_z) - Comparação Real vs Modelo');
+grid on;
+
+% Aumentar a ordem melhora significativamente o Fit.
+% Estimar um modelo de 6ª ordem (2 pólos, 5 zeros) para comparar.
+sysX_high = tfest(dataX_val, 6, 5);
+sysX_high1 = tfest(dataX_val, 8, 5);
+sysX_high2 = tfest(dataX_val, 10, 5);
+
+% sysX_high = tfest(dataX_val, 10, 2);
+% sysX_high1 = tfest(dataX_val, 10, 4);
+% sysX_high2 = tfest(dataX_val, 10, 6);
+
+
+
+% Esta figura mostra os dados reais vs Modelo 2ª Ordem vs Modelo 6ª Ordem
+figure('Name', 'Figura: Comparação de Modelos de Diferentes Ordens', 'Color', 'w');
+
+% O comando COMPARE, compara os 3 sistemas
+compare(dataX_val, sysX, sysX_high, sysX_high1, sysX_high2);
+
+title('Figura: Melhoria do Ajuste com Modelos de Ordem Superior (Eixo X)');
+grid on;
+legend('Dados Reais', 'Modelo 2ª Ordem (0 zeros)', 'Modelo 6.ª Ordem (5 zeros)', 'Modelo 8ª Ordem (5 zeros)', 'Modelo 10ª Ordem (5 zeros)');
+
+[~, fit_2] = compare(dataX_full, sysX);
+[~, fit_6] = compare(dataX_full, sysX_high);
+[~, fit_8] = compare(dataX_full, sysX_high1);
+[~, fit_10] = compare(dataX_full, sysX_high2);
+
+
+% [~, fit_2] = compare(dataX_full, sysX);
+% [~, fit_10_2] = compare(dataX_full, sysX_high);
+% [~, fit_10_4] = compare(dataX_full, sysX_high1);
+% [~, fit_10_6] = compare(dataX_full, sysX_high2);
+
+fprintf('Fit Modelo 2ª Ordem (0 zeros): %.2f%%\n', fit_2);
+fprintf('Fit Modelo 6ª Ordem (5 zeros): %.2f%%\n', fit_6);
+fprintf('Fit Modelo 8ª Ordem (5 zeros): %.2f%%\n', fit_8);
+fprintf('Fit Modelo 10ª Ordem (5 zeros): %.2f%%\n', fit_10);
+
+
+% fprintf('Fit Modelo 2ª Ordem: %.2f%%\n', fit_2);
+% fprintf('Fit Modelo 10ª Ordem (2 zeros): %.2f%%\n', fit_10_2);
+% fprintf('Fit Modelo 10ª Ordem (4 zeros): %.2f%%\n', fit_10_4);
+% fprintf('Fit Modelo 10ª Ordem (6 zeros): %.2f%%\n', fit_10_6);
